@@ -29,7 +29,7 @@ from PIL.PngImagePlugin import PngInfo
 import folder_paths
 
 # ── Version ──────────────────────────────────────────────
-KEV_VERSION = "2.3.1"
+KEV_VERSION = "2.3.2"
 KEV_BUILD   = "2026.04.02"
 
 
@@ -195,7 +195,7 @@ def _seq_basename(shot, type_name, version):
 
 
 def _seq_frame_name(basename, frame, ext):
-    """Nuke-style dot-separated frame:  ner010_comp_v001.0042.png"""
+    """Nuke-style dot-separated frame:  ner010_comp_v001.1001.png"""
     return "{}.{:04d}.{}".format(basename, frame, ext)
 
 
@@ -207,6 +207,28 @@ def _seq_single_name(basename, ext):
 def _nuke_pattern(ver_dir, basename, ext):
     """Nuke Read node pattern: .../v001/ner010_comp_v001.%04d.png"""
     return os.path.join(ver_dir, "{}.%04d.{}".format(basename, ext))
+
+
+# VFX start frame — industry standard
+_START_FRAME = 1001
+
+# Server → workstation path translation
+_PATH_TRANSLATIONS = (
+    ("/mnt/comfyui/", "/kev/comfyui/"),
+    ("/opt/comfyui/", "/kev/comfyui/"),
+)
+
+
+def _to_workstation_path(server_path):
+    """Translate server mount path to workstation mount path.
+    Handles /mnt/comfyui/ → /kev/comfyui/ in all positions.
+    """
+    result = server_path
+    for server_prefix, ws_prefix in _PATH_TRANSLATIONS:
+        if server_prefix in result:
+            result = result.replace(server_prefix, ws_prefix, 1)
+            break
+    return result
 
 
 def _write_sidecar(filepath, metadata):
@@ -307,6 +329,18 @@ class KevWriteImage:
     CATEGORY = "KevinAI"
     DESCRIPTION = "priceline/ner010/comps/v001/ner010_comp_v001.%04d.png"
 
+    @classmethod
+    def VALIDATE_INPUTS(cls, images=None, sequence="", shot="", type="", format="",
+                        user="", notes="", prompt=None, extra_pnginfo=None):
+        """Runs BEFORE execution — blocks the entire queue instantly."""
+        clean_user = _sanitize(_resolve_user(user)) if user else ""
+        clean_shot = _sanitize(shot) if shot else ""
+        if not clean_user or clean_user in ("_unsorted", "_auto_"):
+            return "KevinAI: No username set. Type your name in the 'user' field (e.g. isaacirvin)."
+        if not clean_shot or clean_shot in ("comp", "shot", "ai", "show"):
+            return "KevinAI: Shot is '{}' — use the job picker or type your shot name (e.g. ner010).".format(shot)
+        return True
+
     def write_image(self, images, sequence, shot, type, format,
                     user="_auto_", notes="",
                     prompt=None, extra_pnginfo=None):
@@ -314,13 +348,6 @@ class KevWriteImage:
         resolved_user = _sanitize(_resolve_user(user)) or "_unsorted"
         sequence = _sanitize(sequence) or "show"
         shot = _sanitize(shot) or "shot"
-
-        # Pre-render validation
-        if resolved_user == "_unsorted":
-            print("[KevinAI] WARNING: User not detected — output goes to _unsorted/")
-            print("[KevinAI]   Set the 'user' field on the node")
-        if shot in ("comp", "shot", "ai"):
-            print("[KevinAI] WARNING: Shot '{}' looks like a default — check your shot name".format(shot))
 
         type_dir_name = type + "s" if not type.endswith("s") else type
         type_dir = os.path.join(_detect_outputs(), resolved_user, sequence, shot, type_dir_name)
@@ -341,9 +368,9 @@ class KevWriteImage:
             img_np = (image.cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
             pil_img = Image.fromarray(img_np)
 
-            # Nuke-style naming
+            # Nuke-style naming — frames start at 1001
             if is_sequence:
-                fname = _seq_frame_name(basename, i, format)
+                fname = _seq_frame_name(basename, i + _START_FRAME, format)
             else:
                 fname = _seq_single_name(basename, format)
 
@@ -361,7 +388,7 @@ class KevWriteImage:
                 pi.add_text("KevinAI_version", "v{:03d}".format(version))
                 pi.add_text("KevinAI_user", resolved_user)
                 if is_sequence:
-                    pi.add_text("KevinAI_frame", str(i))
+                    pi.add_text("KevinAI_frame", str(i + _START_FRAME))
                 pil_img.save(fpath, pnginfo=pi, compress_level=1)
             elif format == "jpg":
                 pil_img.save(fpath, quality=98, subsampling=0)
@@ -397,18 +424,21 @@ class KevWriteImage:
             "kevinai_version": KEV_VERSION,
         }
         if is_sequence:
-            sidecar_meta["first_frame"] = 0
-            sidecar_meta["last_frame"] = len(images) - 1
-            sidecar_meta["nuke_path"] = _nuke_pattern(
-                ver_dir, basename, format)
+            sidecar_meta["first_frame"] = _START_FRAME
+            sidecar_meta["last_frame"] = _START_FRAME + len(images) - 1
+            sidecar_meta["nuke_path"] = _to_workstation_path(
+                _nuke_pattern(ver_dir, basename, format))
         _write_sidecar(sidecar_path, sidecar_meta)
 
-        # Filepath for copy button:
+        # Filepath for copy button (workstation path):
         # Sequence → Nuke %04d pattern, Single → actual file
         if is_sequence:
-            copy_path = _nuke_pattern(ver_dir, basename, format)
+            copy_path = _to_workstation_path(
+                _nuke_pattern(ver_dir, basename, format))
+            copy_path += " {}-{}".format(_START_FRAME, _START_FRAME + len(images) - 1)
         else:
-            copy_path = written_paths[0] if written_paths else ver_dir
+            copy_path = _to_workstation_path(
+                written_paths[0] if written_paths else ver_dir)
 
         print("[KevinAI] v{:03d} → {} files".format(version, len(written_paths)))
         if is_sequence:
@@ -459,6 +489,18 @@ class KevWriteVideo:
     CATEGORY = "KevinAI"
     DESCRIPTION = "priceline/ner010/video/v001/ner010_video_v001.mp4"
 
+    @classmethod
+    def VALIDATE_INPUTS(cls, images=None, sequence="", shot="", fps=24,
+                        user="", quality="high", bt709=True, notes=""):
+        """Runs BEFORE execution — blocks the entire queue instantly."""
+        clean_user = _sanitize(_resolve_user(user)) if user else ""
+        clean_shot = _sanitize(shot) if shot else ""
+        if not clean_user or clean_user in ("_unsorted", "_auto_"):
+            return "KevinAI: No username set. Type your name in the 'user' field (e.g. isaacirvin)."
+        if not clean_shot or clean_shot in ("comp", "shot", "ai", "show"):
+            return "KevinAI: Shot is '{}' — use the job picker or type your shot name (e.g. ner010).".format(shot)
+        return True
+
     def write_video(self, images, sequence, shot, fps,
                     user="_auto_", quality="high", bt709=True, notes=""):
 
@@ -475,13 +517,6 @@ class KevWriteVideo:
         resolved_user = _sanitize(_resolve_user(user)) or "_unsorted"
         sequence = _sanitize(sequence) or "show"
         shot = _sanitize(shot) or "shot"
-
-        # Pre-render validation
-        if resolved_user == "_unsorted":
-            print("[KevinAI] WARNING: User not detected — output goes to _unsorted/")
-            print("[KevinAI]   Set the 'user' field on the node")
-        if shot in ("comp", "shot", "ai"):
-            print("[KevinAI] WARNING: Shot '{}' looks like a default — check your shot name".format(shot))
 
         type_dir = os.path.join(_detect_outputs(), resolved_user, sequence, shot, "video")
 
@@ -590,7 +625,7 @@ class KevWriteVideo:
             "kevinai_version": KEV_VERSION,
         })
 
-        return {"ui": {"gifs": preview_results, "filepath": [fpath]},
+        return {"ui": {"gifs": preview_results, "filepath": [_to_workstation_path(fpath)]},
                 "result": (ver_dir, fname, version)}
 
 

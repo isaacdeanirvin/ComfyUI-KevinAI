@@ -19,7 +19,7 @@ import { api } from "../../scripts/api.js";
 const KEVIN_ORANGE  = "#f5881e";
 const KEVIN_PINK    = "#eb008b";
 const KEVIN_BODY    = "#1e1215";
-const KEV_VERSION   = "2.3.1";
+const KEV_VERSION   = "2.3.2";
 
 const KEVIN_NODES = ["KevWriteVideo", "KevWriteImage", "KevPathInfo"];
 const VIDEO_NODES = ["KevWriteVideo"];
@@ -200,7 +200,7 @@ function setupKevinNode(node) {
             "flex:1;height:24px;border-radius:3px",
             "border:1px solid #444;background:#1a1a1a;color:#ccc",
             "font-size:11px;font-family:-apple-system,BlinkMacSystemFont,sans-serif",
-            "padding:0 4px;cursor:pointer;outline:none",
+            "padding:0 4px;outline:none",
         ].join(";");
 
         const pickerEl = document.createElement("div");
@@ -213,91 +213,119 @@ function setupKevinNode(node) {
             }
         }
 
-        // Job select
-        const jobSel = document.createElement("select");
-        jobSel.style.cssText = SEL_CSS;
-        jobSel.innerHTML = '<option value="">job...</option>';
-        pickerEl.appendChild(jobSel);
+        // Unique IDs for datalists (per node)
+        const uid = "kev" + node.id;
 
-        // Sequence select
-        const seqSel = document.createElement("select");
-        seqSel.style.cssText = SEL_CSS;
-        seqSel.innerHTML = '<option value="">seq...</option>';
-        seqSel.disabled = true;
-        pickerEl.appendChild(seqSel);
+        // Job input + datalist
+        const jobList = document.createElement("datalist");
+        jobList.id = uid + "_jobs";
+        pickerEl.appendChild(jobList);
+        const jobInp = document.createElement("input");
+        jobInp.style.cssText = SEL_CSS;
+        jobInp.placeholder = "job...";
+        jobInp.setAttribute("list", jobList.id);
+        pickerEl.appendChild(jobInp);
 
-        // Shot select
-        const shotSel = document.createElement("select");
-        shotSel.style.cssText = SEL_CSS;
-        shotSel.innerHTML = '<option value="">shot...</option>';
-        shotSel.disabled = true;
-        pickerEl.appendChild(shotSel);
+        // Sequence input + datalist
+        const seqList = document.createElement("datalist");
+        seqList.id = uid + "_seqs";
+        pickerEl.appendChild(seqList);
+        const seqInp = document.createElement("input");
+        seqInp.style.cssText = SEL_CSS;
+        seqInp.placeholder = "seq...";
+        seqInp.setAttribute("list", seqList.id);
+        seqInp.disabled = true;
+        pickerEl.appendChild(seqInp);
 
-        // Load jobs on first open
-        jobSel.addEventListener("focus", async function() {
-            if (jobSel.options.length > 1) return;
+        // Shot input + datalist
+        const shotList = document.createElement("datalist");
+        shotList.id = uid + "_shots";
+        pickerEl.appendChild(shotList);
+        const shotInp = document.createElement("input");
+        shotInp.style.cssText = SEL_CSS;
+        shotInp.placeholder = "shot...";
+        shotInp.setAttribute("list", shotList.id);
+        shotInp.disabled = true;
+        pickerEl.appendChild(shotInp);
+
+        // Helper: populate a datalist
+        function fillDatalist(dl, items) {
+            dl.innerHTML = "";
+            for (const item of items) {
+                const opt = document.createElement("option");
+                opt.value = item;
+                dl.appendChild(opt);
+            }
+        }
+
+        // Load jobs on first focus
+        let jobsLoaded = false;
+        jobInp.addEventListener("focus", async function() {
+            if (jobsLoaded) return;
+            jobsLoaded = true;
             try {
                 const r = await api.fetchApi("/kevinai/jobs");
                 if (!r.ok) return;
                 const d = await r.json();
-                for (const j of d.jobs) {
-                    const opt = document.createElement("option");
-                    opt.value = j; opt.textContent = j;
-                    jobSel.appendChild(opt);
-                }
-            } catch(e) {}
-        }, {once: true});
-
-        // Job changed → load sequences
-        jobSel.addEventListener("change", async function() {
-            seqSel.innerHTML = '<option value="">seq...</option>';
-            shotSel.innerHTML = '<option value="">shot...</option>';
-            seqSel.disabled = true;
-            shotSel.disabled = true;
-            if (!jobSel.value) return;
-            try {
-                const r = await api.fetchApi("/kevinai/sequences?job=" + encodeURIComponent(jobSel.value));
-                if (!r.ok) return;
-                const d = await r.json();
-                for (const s of d.sequences) {
-                    const opt = document.createElement("option");
-                    opt.value = s; opt.textContent = s;
-                    seqSel.appendChild(opt);
-                }
-                seqSel.disabled = false;
+                fillDatalist(jobList, d.jobs);
             } catch(e) {}
         });
 
-        // Sequence changed → load shots, fill sequence widget
-        seqSel.addEventListener("change", async function() {
-            shotSel.innerHTML = '<option value="">shot...</option>';
-            shotSel.disabled = true;
-            if (!seqSel.value) return;
-            setWidget("sequence", seqSel.value);
+        // Job selected → load sequences, auto-pick first
+        jobInp.addEventListener("change", async function() {
+            seqInp.value = "";
+            shotInp.value = "";
+            fillDatalist(seqList, []);
+            fillDatalist(shotList, []);
+            seqInp.disabled = true;
+            shotInp.disabled = true;
+            if (!jobInp.value) return;
             try {
-                const r = await api.fetchApi("/kevinai/shots?job=" + encodeURIComponent(jobSel.value) + "&seq=" + encodeURIComponent(seqSel.value));
+                const r = await api.fetchApi("/kevinai/sequences?job=" + encodeURIComponent(jobInp.value));
                 if (!r.ok) return;
                 const d = await r.json();
-                for (const s of d.shots) {
-                    const opt = document.createElement("option");
-                    opt.value = s; opt.textContent = s;
-                    shotSel.appendChild(opt);
+                fillDatalist(seqList, d.sequences);
+                seqInp.disabled = false;
+                // Auto-pick first sequence
+                if (d.sequences.length === 1) {
+                    seqInp.value = d.sequences[0];
+                    seqInp.dispatchEvent(new Event("change"));
                 }
-                shotSel.disabled = false;
+            } catch(e) {}
+        });
+
+        // Sequence selected → load shots, auto-pick first, fill widget
+        seqInp.addEventListener("change", async function() {
+            shotInp.value = "";
+            fillDatalist(shotList, []);
+            shotInp.disabled = true;
+            if (!seqInp.value) return;
+            setWidget("sequence", seqInp.value);
+            try {
+                const r = await api.fetchApi("/kevinai/shots?job=" + encodeURIComponent(jobInp.value) + "&seq=" + encodeURIComponent(seqInp.value));
+                if (!r.ok) return;
+                const d = await r.json();
+                fillDatalist(shotList, d.shots);
+                shotInp.disabled = false;
+                // Auto-pick first shot
+                if (d.shots.length === 1) {
+                    shotInp.value = d.shots[0];
+                    shotInp.dispatchEvent(new Event("change"));
+                }
             } catch(e) {}
             app.graph.setDirtyCanvas(true);
         });
 
-        // Shot changed → fill shot widget
-        shotSel.addEventListener("change", function() {
-            if (shotSel.value) {
-                setWidget("shot", shotSel.value);
+        // Shot selected → fill widget
+        shotInp.addEventListener("change", function() {
+            if (shotInp.value) {
+                setWidget("shot", shotInp.value);
                 app.graph.setDirtyCanvas(true);
             }
         });
 
         node.addDOMWidget("kev_shot_picker", "custom", pickerEl, {
-            getValue() { return jobSel.value + "/" + seqSel.value + "/" + shotSel.value; },
+            getValue() { return jobInp.value + "/" + seqInp.value + "/" + shotInp.value; },
             setValue(v) {},
             getMinHeight() { return 30; },
         });
@@ -353,6 +381,32 @@ function setupKevinNode(node) {
             if (lastFilepath) copyToClipboard(lastFilepath, copyBtn);
         });
         copyContainer.appendChild(copyBtn);
+
+        // RV button — copies terminal command to open in RV
+        const rvBtn = document.createElement("button");
+        rvBtn.textContent = "RV";
+        rvBtn.style.cssText = [
+            "flex-shrink:0;padding:3px 8px;border-radius:4px",
+            "border:1px solid " + KEVIN_PINK,
+            "background:rgba(235,0,139,0.15);color:" + KEVIN_PINK,
+            "font-size:11px;font-weight:700",
+            "font-family:-apple-system,BlinkMacSystemFont,sans-serif",
+            "cursor:pointer;transition:all 0.15s ease",
+        ].join(";");
+        rvBtn.addEventListener("mouseenter", () => {
+            if (rvBtn.textContent === "RV") rvBtn.style.background = "rgba(235,0,139,0.3)";
+        });
+        rvBtn.addEventListener("mouseleave", () => {
+            if (rvBtn.textContent === "RV") rvBtn.style.background = "rgba(235,0,139,0.15)";
+        });
+        rvBtn.addEventListener("click", () => {
+            if (lastFilepath) {
+                // Strip frame range suffix for RV (it reads %04d natively)
+                const rvPath = lastFilepath.replace(/ \d+-\d+$/, "");
+                copyToClipboard("/software/tools/bin/rv " + rvPath, rvBtn);
+            }
+        });
+        copyContainer.appendChild(rvBtn);
 
         node.addDOMWidget("kev_copy_path", "custom", copyContainer, {
             getValue()  { return lastFilepath || ""; },
