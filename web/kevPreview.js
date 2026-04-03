@@ -19,7 +19,7 @@ import { api } from "../../scripts/api.js";
 const KEVIN_ORANGE  = "#f5881e";
 const KEVIN_PINK    = "#eb008b";
 const KEVIN_BODY    = "#1e1215";
-const KEV_VERSION   = "2.3.2";
+const KEV_VERSION   = "2.4.0";
 
 const KEVIN_NODES = ["KevWriteVideo", "KevWriteImage", "KevPathInfo"];
 const VIDEO_NODES = ["KevWriteVideo"];

@@ -29,7 +29,7 @@ from PIL.PngImagePlugin import PngInfo
 import folder_paths
 
 # ── Version ──────────────────────────────────────────────
-KEV_VERSION = "2.3.2"
+KEV_VERSION = "2.4.0"
 KEV_BUILD   = "2026.04.02"
 
 
@@ -349,16 +349,19 @@ class KevWriteImage:
         sequence = _sanitize(sequence) or "show"
         shot = _sanitize(shot) or "shot"
 
-        type_dir_name = type + "s" if not type.endswith("s") else type
-        type_dir = os.path.join(_detect_outputs(), resolved_user, sequence, shot, type_dir_name)
+        # Pipeline convention: {outputs}/{user}/{seq}/{shot}/ai/{task}/v{NNN}/{format}/
+        # Mirrors: shots/ner/ner010/output/plates/plate_flat/v001/jpg/
+        task_dir = os.path.join(_detect_outputs(), resolved_user, sequence, shot, "ai", type)
 
-        # Create versioned directory: .../comps/v001/
-        version, ver_dir = _next_version_dir(type_dir)
+        # Create versioned directory with format subdirectory
+        version, ver_dir = _next_version_dir(task_dir)
+        fmt_dir = os.path.join(ver_dir, format)
+        os.makedirs(fmt_dir, exist_ok=True)
         basename = _seq_basename(shot, type, version)
         is_sequence = len(images) > 1
 
-        print("[KevinAI] Output → {}/{}/{}/{}/v{:03d}/  ({} frame{})".format(
-            resolved_user, sequence, shot, type_dir_name, version,
+        print("[KevinAI] Output → {}/{}/{}/ai/{}/v{:03d}/{}/  ({} frame{})".format(
+            resolved_user, sequence, shot, type, version, format,
             len(images), "s" if len(images) > 1 else ""))
 
         results = []
@@ -374,7 +377,7 @@ class KevWriteImage:
             else:
                 fname = _seq_single_name(basename, format)
 
-            fpath = os.path.join(ver_dir, fname)
+            fpath = os.path.join(fmt_dir, fname)
 
             if format == "png":
                 pi = PngInfo()
@@ -409,7 +412,7 @@ class KevWriteImage:
                 except Exception as e:
                     print("[KevinAI] Preview failed: {}".format(e))
 
-        # One sidecar for the entire version
+        # One sidecar for the entire version (lives at version level, not in format subdir)
         sidecar_path = os.path.join(ver_dir, basename + ".json")
         sidecar_meta = {
             "user": resolved_user,
@@ -427,18 +430,17 @@ class KevWriteImage:
             sidecar_meta["first_frame"] = _START_FRAME
             sidecar_meta["last_frame"] = _START_FRAME + len(images) - 1
             sidecar_meta["nuke_path"] = _to_workstation_path(
-                _nuke_pattern(ver_dir, basename, format))
+                _nuke_pattern(fmt_dir, basename, format))
         _write_sidecar(sidecar_path, sidecar_meta)
 
         # Filepath for copy button (workstation path):
-        # Sequence → Nuke %04d pattern, Single → actual file
         if is_sequence:
             copy_path = _to_workstation_path(
-                _nuke_pattern(ver_dir, basename, format))
+                _nuke_pattern(fmt_dir, basename, format))
             copy_path += " {}-{}".format(_START_FRAME, _START_FRAME + len(images) - 1)
         else:
             copy_path = _to_workstation_path(
-                written_paths[0] if written_paths else ver_dir)
+                written_paths[0] if written_paths else fmt_dir)
 
         print("[KevinAI] v{:03d} → {} files".format(version, len(written_paths)))
         if is_sequence:
@@ -518,17 +520,20 @@ class KevWriteVideo:
         sequence = _sanitize(sequence) or "show"
         shot = _sanitize(shot) or "shot"
 
-        type_dir = os.path.join(_detect_outputs(), resolved_user, sequence, shot, "video")
+        # Pipeline convention: {outputs}/{user}/{seq}/{shot}/ai/video/v{NNN}/{ext}/
+        task_dir = os.path.join(_detect_outputs(), resolved_user, sequence, shot, "ai", "video")
 
-        # Versioned directory: .../video/v001/
-        version, ver_dir = _next_version_dir(type_dir)
+        # Versioned directory with format subdirectory
+        version, ver_dir = _next_version_dir(task_dir)
         ext = "mov" if codec == "prores" else "mp4"
+        fmt_dir = os.path.join(ver_dir, ext)
+        os.makedirs(fmt_dir, exist_ok=True)
         basename = _seq_basename(shot, "video", version)
         fname = _seq_single_name(basename, ext)
-        fpath = os.path.join(ver_dir, fname)
+        fpath = os.path.join(fmt_dir, fname)
 
-        print("[KevinAI] Output → {}/{}/{}/video/v{:03d}/".format(
-            resolved_user, sequence, shot, version))
+        print("[KevinAI] Output → {}/{}/{}/ai/video/v{:03d}/{}/".format(
+            resolved_user, sequence, shot, version, ext))
 
         num_frames = len(images)
         if num_frames == 0:
