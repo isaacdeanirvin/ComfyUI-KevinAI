@@ -4,9 +4,8 @@ ComfyUI-KevinAI
 Custom nodes for Kevin VFX studio pipeline integration.
 
 Nodes:
- - KevinAI Write Image  — PNG/JPG/EXR → versioned Nuke-style output
- - KevinAI Write Video  — IMAGE batch → MP4/ProRes → versioned output
- - KevinAI Path Info    — Show pipeline paths & env vars
+ - KevinAI Write     — Unified output: frames + video + preview
+ - KevinAI Path Info — Show pipeline paths & env vars
 """
 
 from .nodes.kev_write import (

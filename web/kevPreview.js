@@ -19,11 +19,11 @@ import { api } from "../../scripts/api.js";
 const KEVIN_ORANGE  = "#f5881e";
 const KEVIN_PINK    = "#eb008b";
 const KEVIN_BODY    = "#1e1215";
-const KEV_VERSION   = "2.4.0";
+const KEV_VERSION   = "3.0.0";
 
-const KEVIN_NODES = ["KevWriteVideo", "KevWriteImage", "KevPathInfo"];
-const VIDEO_NODES = ["KevWriteVideo"];
-const WRITE_NODES = ["KevWriteVideo", "KevWriteImage"];
+const KEVIN_NODES = ["KevWrite", "KevPathInfo"];
+const VIDEO_NODES = ["KevWrite"];
+const WRITE_NODES = ["KevWrite"];
 
 /* ── Logo letter colors ─────────────────────────────── */
 const LOGO_COLORS = {
@@ -38,9 +38,8 @@ const LOGO_COLORS = {
 
 /* ── Display name lookup (works even after title blank) */
 const DISPLAY_NAMES = {
-    "KevWriteImage": "KevinAI Write Image",
-    "KevWriteVideo": "KevinAI Write Video",
-    "KevPathInfo":   "KevinAI Path Info",
+    "KevWrite":    "KevinAI Write",
+    "KevPathInfo": "KevinAI Path Info",
 };
 
 /* ── User identity (browser localStorage) ───────────── */
@@ -400,11 +399,9 @@ function setupKevinNode(node) {
             if (rvBtn.textContent === "RV") rvBtn.style.background = "rgba(235,0,139,0.15)";
         });
         rvBtn.addEventListener("click", () => {
-            if (lastFilepath) {
-                // Strip frame range suffix for RV (it reads %04d natively)
-                const rvPath = lastFilepath.replace(/ \d+-\d+$/, "");
-                copyToClipboard("/software/tools/bin/rv " + rvPath, rvBtn);
-            }
+            // RV gets video path (last in array) or frame path
+            const rvPath = (lastVideoPath || lastFilepath || "").replace(/ \d+-\d+$/, "");
+            if (rvPath) copyToClipboard("/software/tools/bin/rv " + rvPath, rvBtn);
         });
         copyContainer.appendChild(rvBtn);
 
@@ -416,13 +413,19 @@ function setupKevinNode(node) {
     }
 
     /* ── onExecuted: copy path + video preview ─────── */
+    let lastVideoPath = null;
     const _origExec = node.onExecuted;
     node.onExecuted = function(output) {
         if (_origExec) _origExec.call(this, output);
 
-        // Copy path
+        // Copy path — first = frames (Nuke), second = video
         if (output && output.filepath && output.filepath.length > 0) {
             lastFilepath = output.filepath[0];
+            if (output.filepath.length > 1) {
+                lastVideoPath = output.filepath[1];
+            } else {
+                lastVideoPath = output.filepath[0];
+            }
             ensureCopyWidget();
             copyContainer._label.textContent = lastFilepath;
         }
