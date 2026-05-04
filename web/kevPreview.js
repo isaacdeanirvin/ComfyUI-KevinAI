@@ -19,7 +19,250 @@ import { api } from "../../scripts/api.js";
 const KEVIN_ORANGE  = "#f5881e";
 const KEVIN_PINK    = "#eb008b";
 const KEVIN_BODY    = "#1e1215";
-const KEV_VERSION   = "3.0.0";
+const KEV_VERSION   = "3.1.0";
+
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ *  CHANGED v3.1.0 — HDR preview pipeline (KevWrite)
+ * ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ *  Adds an inline color-science toolbar above each KevWrite preview
+ *  with three live controls:
+ *
+ *    exposure     [-8 EV ... +8 EV]   — multiplies linearised RGB by 2^EV
+ *    saturation   [0   ...   2]       — Rec.709-luma weighted desat/oversat
+ *    input_space  {sRGB | linear | logc3 | ACEScct | rec709}
+ *                                     — what color space the source media
+ *                                       is encoded in; we decode → linear,
+ *                                       apply exposure + sat, re-encode sRGB
+ *
+ *  Defaults reset every load: exposure 0, saturation 1, input sRGB.
+ *  No per-node localStorage (matches Isaac's spec — fresh start each time).
+ *
+ *  Implementation:
+ *    The browser <video> element stays visible underneath with all native
+ *    controls (play / scrub / time / fullscreen) functional. A WebGL
+ *    <canvas> overlays the video's frame area with pointer-events:none so
+ *    clicks pass through to the controls. A requestAnimationFrame loop
+ *    samples the current video frame as a texture, runs the fragment
+ *    shader, writes to the canvas. Result: KJNodes-grade HDR inspection
+ *    on log/linear footage with zero impact on the underlying playback.
+ *
+ *    If WebGL is unavailable the canvas stays hidden and the raw video
+ *    is shown — feature degrades silently to today's behaviour.
+ * ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+
+const HDR_INPUT_SPACES = ["srgb", "linear", "logc3", "acescct", "rec709"];
+const HDR_SPACE_LABELS = {
+    "srgb":    "sRGB",
+    "linear":  "linear",
+    "logc3":   "logc3",
+    "acescct": "ACEScct",
+    "rec709":  "rec709",
+};
+
+const HDR_VERTEX_SHADER = `
+    attribute vec2 aPos;
+    varying vec2 vUV;
+    void main() {
+        vUV = vec2(aPos.x * 0.5 + 0.5, 1.0 - (aPos.y * 0.5 + 0.5));
+        gl_Position = vec4(aPos, 0.0, 1.0);
+    }
+`;
+
+// Fragment shader: per-pixel decode → exposure → saturation → encode sRGB.
+// Color-science formulas are the standard published transforms:
+//   sRGB EOTF / OETF  — IEC 61966-2-1
+//   Rec.709 / BT.1886 — ITU-R BT.1886
+//   ALEXA LogC3 EI800 — Arri whitepaper
+//   ACEScct           — Academy / SMPTE ST 2065
+const HDR_FRAGMENT_SHADER = `
+    precision highp float;
+    varying vec2 vUV;
+    uniform sampler2D uTex;
+    uniform float uExposure;
+    uniform float uSaturation;
+    uniform int   uInputSpace;
+
+    vec3 srgbToLinear(vec3 c) {
+        return mix(c / 12.92,
+                   pow((c + 0.055) / 1.055, vec3(2.4)),
+                   step(0.04045, c));
+    }
+    vec3 linearToSrgb(vec3 c) {
+        c = clamp(c, 0.0, 1.0);
+        return mix(c * 12.92,
+                   1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055,
+                   step(0.0031308, c));
+    }
+    vec3 rec709ToLinear(vec3 c) {
+        return mix(c / 4.5,
+                   pow((c + 0.099) / 1.099, vec3(1.0 / 0.45)),
+                   step(0.081, c));
+    }
+    float logc3ToLinearChan(float v) {
+        return v < 0.1496582
+            ? (v - 0.092809) / 5.367655
+            : (pow(10.0, (v - 0.385537) / 0.2471896) - 0.052272) / 5.555556;
+    }
+    vec3 logc3ToLinear(vec3 c) {
+        return vec3(logc3ToLinearChan(c.r),
+                    logc3ToLinearChan(c.g),
+                    logc3ToLinearChan(c.b));
+    }
+    float acescctToLinearChan(float v) {
+        return v <= 0.155251141552511
+            ? (v - 0.0729055341958355) / 10.5402377416545
+            : pow(2.0, v * 17.52 - 9.72);
+    }
+    vec3 acescctToLinear(vec3 c) {
+        return vec3(acescctToLinearChan(c.r),
+                    acescctToLinearChan(c.g),
+                    acescctToLinearChan(c.b));
+    }
+
+    void main() {
+        vec3 c = texture2D(uTex, vUV).rgb;
+        // Decode to linear scene-light per uInputSpace (0=srgb, 1=linear,
+        // 2=logc3, 3=acescct, 4=rec709). GLSL ES 1.00 has no switch — the
+        // chained conditionals are equivalent and shader compilers fold
+        // them well on modern hardware.
+        if      (uInputSpace == 0) c = srgbToLinear(c);
+        else if (uInputSpace == 1) c = c;
+        else if (uInputSpace == 2) c = logc3ToLinear(c);
+        else if (uInputSpace == 3) c = acescctToLinear(c);
+        else if (uInputSpace == 4) c = rec709ToLinear(c);
+
+        // Exposure: linear gain by 2^EV. -3.28 EV \u2248 0.103x, +3.28 EV \u2248 9.71x.
+        c *= pow(2.0, uExposure);
+
+        // Saturation: lerp between greyscale luma (Rec.709 weights) and
+        // the original color. uSaturation == 1 is identity, 0 fully grey,
+        // 2 doubles chroma distance from grey.
+        float luma = dot(c, vec3(0.2126, 0.7152, 0.0722));
+        c = mix(vec3(luma), c, uSaturation);
+
+        gl_FragColor = vec4(linearToSrgb(c), 1.0);
+    }
+`;
+
+/**
+ * Wire a WebGL HDR preview pipeline onto an existing <video> + <canvas>
+ * pair. Returns { params, dispose } where mutating params.exposure /
+ * params.saturation / params.inputSpace immediately affects the next
+ * rendered frame, and dispose() tears down the rAF loop + GL context.
+ *
+ * If WebGL is unavailable, returns null \u2014 callers should hide the
+ * canvas and let the native <video> element render directly.
+ */
+function setupHDRPipeline(videoEl, canvasEl) {
+    const gl = canvasEl.getContext("webgl", { premultipliedAlpha: false })
+            || canvasEl.getContext("experimental-webgl", { premultipliedAlpha: false });
+    if (!gl) {
+        console.warn("[KevinAI] WebGL unavailable \u2014 HDR preview disabled");
+        return null;
+    }
+
+    function compile(type, src) {
+        const sh = gl.createShader(type);
+        gl.shaderSource(sh, src);
+        gl.compileShader(sh);
+        if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+            console.error("[KevinAI] shader compile error:", gl.getShaderInfoLog(sh));
+            gl.deleteShader(sh);
+            return null;
+        }
+        return sh;
+    }
+    const vs = compile(gl.VERTEX_SHADER, HDR_VERTEX_SHADER);
+    const fs = compile(gl.FRAGMENT_SHADER, HDR_FRAGMENT_SHADER);
+    if (!vs || !fs) return null;
+
+    const prog = gl.createProgram();
+    gl.attachShader(prog, vs);
+    gl.attachShader(prog, fs);
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+        console.error("[KevinAI] shader link error:", gl.getProgramInfoLog(prog));
+        return null;
+    }
+    gl.useProgram(prog);
+
+    // Full-screen triangle (covers the viewport in one draw call without
+    // a quad's diagonal seam). Saves a vertex but more importantly avoids
+    // the quad-rasterizer's center-of-pixel artefacts.
+    const buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER,
+        new Float32Array([-1, -1,  3, -1,  -1,  3]), gl.STATIC_DRAW);
+    const aPos = gl.getAttribLocation(prog, "aPos");
+    gl.enableVertexAttribArray(aPos);
+    gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S,     gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T,     gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+
+    const uExposure   = gl.getUniformLocation(prog, "uExposure");
+    const uSaturation = gl.getUniformLocation(prog, "uSaturation");
+    const uInputSpace = gl.getUniformLocation(prog, "uInputSpace");
+    const uTex        = gl.getUniformLocation(prog, "uTex");
+    gl.uniform1i(uTex, 0);
+
+    const params = { exposure: 0, saturation: 1, inputSpace: 0 };
+    let rafId = null;
+    let disposed = false;
+
+    function render() {
+        if (disposed) return;
+        // Match canvas backing size to its CSS pixel size (devicePixelRatio
+        // capped at 2 to keep GPU load reasonable on 4K monitors).
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        const cssW = canvasEl.clientWidth;
+        const cssH = canvasEl.clientHeight;
+        const targetW = Math.max(1, Math.floor(cssW * dpr));
+        const targetH = Math.max(1, Math.floor(cssH * dpr));
+        if (canvasEl.width !== targetW || canvasEl.height !== targetH) {
+            canvasEl.width = targetW;
+            canvasEl.height = targetH;
+        }
+        gl.viewport(0, 0, canvasEl.width, canvasEl.height);
+
+        // Skip GPU work when the source has no decoded frames yet \u2014
+        // readyState < 2 (HAVE_CURRENT_DATA) means texImage2D would
+        // upload garbage. Spin again next rAF.
+        if (videoEl.readyState >= 2 && videoEl.videoWidth > 0) {
+            try {
+                gl.bindTexture(gl.TEXTURE_2D, tex);
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA,
+                    gl.UNSIGNED_BYTE, videoEl);
+                gl.uniform1f(uExposure,   params.exposure);
+                gl.uniform1f(uSaturation, params.saturation);
+                gl.uniform1i(uInputSpace, params.inputSpace);
+                gl.drawArrays(gl.TRIANGLES, 0, 3);
+            } catch (e) {
+                // Some browsers throw SecurityError on cross-origin video
+                // textures. Surface once and disable the canvas so the
+                // raw video shows through.
+                console.warn("[KevinAI] HDR texImage2D failed \u2014 falling back:", e);
+                disposed = true;
+                canvasEl.style.display = "none";
+                return;
+            }
+        }
+        rafId = requestAnimationFrame(render);
+    }
+    rafId = requestAnimationFrame(render);
+
+    return {
+        params,
+        dispose() {
+            disposed = true;
+            if (rafId !== null) cancelAnimationFrame(rafId);
+        },
+    };
+}
 
 const KEVIN_NODES = ["KevWrite", "KevPathInfo"];
 const VIDEO_NODES = ["KevWrite"];
@@ -453,40 +696,178 @@ function setupKevinNode(node) {
     function ensureVideoWidget() {
         if (node._kevVideoEl) return;
 
+        // CHANGED v3.1.0 — HDR preview toolbar pinned above the video.
+        // Three live controls: exposure, saturation, input_space.
+        // Defaults reset every load (Isaac's spec): exp 0, sat 1, sRGB.
         const containerEl = document.createElement("div");
         containerEl.style.cssText = [
-            "position:relative;background:#0a0a0a",
-            "border-radius:6px;overflow:hidden;margin:4px 0",
+            "background:#0a0a0a",
+            "border-radius:6px","overflow:hidden","margin:4px 0",
             "border:1px solid #333",
         ].join(";");
 
+        // ── Toolbar ────────────────────────────────────
+        const toolbarEl = document.createElement("div");
+        toolbarEl.style.cssText = [
+            "padding:6px 10px","background:#141414",
+            "border-bottom:1px solid #2a2a2a",
+            "font-size:11px","color:#bbb",
+            "display:flex","flex-direction:column","gap:4px",
+        ].join(";");
+
+        function makeSliderRow(label, min, max, step, def, fmt) {
+            const row = document.createElement("div");
+            row.style.cssText = "display:flex;align-items:center;gap:8px";
+            const lbl = document.createElement("span");
+            lbl.textContent = label;
+            lbl.style.cssText = "color:#888;min-width:64px;font-size:10px";
+            const slider = document.createElement("input");
+            slider.type = "range";
+            slider.min = String(min); slider.max = String(max);
+            slider.step = String(step); slider.value = String(def);
+            slider.style.cssText = "flex:1;min-width:60px;accent-color:" + KEVIN_ORANGE;
+            const val = document.createElement("span");
+            val.textContent = fmt(def);
+            val.style.cssText = "color:#ddd;min-width:48px;font-family:monospace;font-size:10px;text-align:right";
+            row.appendChild(lbl); row.appendChild(slider); row.appendChild(val);
+            return { row, slider, val };
+        }
+        const expo = makeSliderRow("exposure",   -8, 8, 0.01, 0,
+            v => (v >= 0 ? "+" : "") + Number(v).toFixed(2));
+        const sat  = makeSliderRow("saturation", 0,  2, 0.01, 1,
+            v => Number(v).toFixed(2));
+        toolbarEl.appendChild(expo.row);
+        toolbarEl.appendChild(sat.row);
+
+        // Input-space dropdown lives in its own row alongside a passive
+        // resolution readout (filled in by onExecuted once we know the
+        // intrinsic video dimensions). Mirrors KJNodes' compact layout.
+        const spaceRow = document.createElement("div");
+        spaceRow.style.cssText = "display:flex;align-items:center;gap:8px";
+        const spaceLbl = document.createElement("span");
+        spaceLbl.textContent = "input space";
+        spaceLbl.style.cssText = "color:#888;min-width:64px;font-size:10px";
+        const spaceSel = document.createElement("select");
+        spaceSel.style.cssText = [
+            "background:#1e1e1e","color:#bbb","border:1px solid #2a2a2a",
+            "border-radius:3px","padding:2px 4px","font-size:10px",
+            "font-family:monospace",
+        ].join(";");
+        for (const k of HDR_INPUT_SPACES) {
+            const opt = document.createElement("option");
+            opt.value = k; opt.textContent = HDR_SPACE_LABELS[k];
+            spaceSel.appendChild(opt);
+        }
+        spaceSel.value = "srgb";  // default per spec
+        const resLbl = document.createElement("span");
+        resLbl.style.cssText = "flex:1;color:#666;font-family:monospace;font-size:10px;text-align:right";
+        spaceRow.appendChild(spaceLbl);
+        spaceRow.appendChild(spaceSel);
+        spaceRow.appendChild(resLbl);
+        toolbarEl.appendChild(spaceRow);
+
+        containerEl.appendChild(toolbarEl);
+
+        // ── Video + canvas overlay ─────────────────────
+        // The <video> stays visible underneath providing native
+        // controls (play/scrub/time/fullscreen). The <canvas> overlays
+        // the frame area with pointer-events:none so clicks fall through
+        // to the controls strip. WebGL pipeline samples the video as a
+        // texture each rAF and writes the tonemapped result to the canvas.
+        const stageEl = document.createElement("div");
+        stageEl.style.cssText = "position:relative;line-height:0";
+
         const videoEl = document.createElement("video");
-        videoEl.style.cssText = "width:100%;display:block;border-radius:6px";
+        videoEl.style.cssText = "width:100%;display:block;border-radius:0 0 6px 6px";
         videoEl.controls = true;
         videoEl.autoplay = true;
         videoEl.loop     = true;
         videoEl.muted    = true;
         videoEl.playsInline = true;
-        containerEl.appendChild(videoEl);
-        node._kevVideoEl = videoEl;
+        // Required for WebGL textures from <video> on cross-origin sources.
+        // ComfyUI's view endpoint is same-origin so this is belt-and-braces.
+        videoEl.crossOrigin = "anonymous";
+        stageEl.appendChild(videoEl);
+
+        const canvasEl = document.createElement("canvas");
+        canvasEl.style.cssText = [
+            "position:absolute","left:0","top:0",
+            "width:100%","height:100%",
+            "pointer-events:none",  // clicks pass through to <video> controls
+            "border-radius:0 0 6px 6px",
+        ].join(";");
+        stageEl.appendChild(canvasEl);
+
+        containerEl.appendChild(stageEl);
+
+        // ── WebGL HDR pipeline ─────────────────────────
+        const pipeline = setupHDRPipeline(videoEl, canvasEl);
+        if (pipeline) {
+            // Wire the toolbar controls to the live pipeline params object.
+            // The rAF render loop reads params each frame, so mutation here
+            // is seen on the very next paint \u2014 no manual redraw needed.
+            expo.slider.addEventListener("input", e => {
+                const v = parseFloat(e.target.value);
+                pipeline.params.exposure = v;
+                expo.val.textContent = (v >= 0 ? "+" : "") + v.toFixed(2);
+            });
+            sat.slider.addEventListener("input", e => {
+                const v = parseFloat(e.target.value);
+                pipeline.params.saturation = v;
+                sat.val.textContent = v.toFixed(2);
+            });
+            spaceSel.addEventListener("change", e => {
+                pipeline.params.inputSpace = HDR_INPUT_SPACES.indexOf(e.target.value);
+            });
+            node._kevHDRPipeline = pipeline;
+        } else {
+            // WebGL unavailable \u2014 hide the canvas, hide the toolbar
+            // (no point showing controls that don't do anything), let the
+            // raw <video> render unmodified. Console-warned in setupHDRPipeline.
+            canvasEl.style.display = "none";
+            toolbarEl.style.display = "none";
+        }
+
+        node._kevVideoEl    = videoEl;
+        node._kevHDRCanvas  = canvasEl;
+        node._kevHDRResLbl  = resLbl;
+        node._kevHDRToolbar = toolbarEl;
 
         const widget = node.addDOMWidget("kev_video_preview", "custom", containerEl, {
             getValue()  { return node._kevVideoSrc || ""; },
             setValue(v)  {},
-            getMinHeight() { return 200; },
+            getMinHeight() { return 280; },  // toolbar adds ~80px to the 200 baseline
         });
         widget.computeSize = function() {
             const nodeWidth = node.size[0] - 20;
+            // Toolbar height: 3 rows \u00d7 ~22px + padding \u2248 80px.
+            const toolbarH = 80;
             if (videoEl.videoWidth && videoEl.videoHeight) {
                 const aspect = videoEl.videoHeight / videoEl.videoWidth;
-                return [nodeWidth, Math.max(160, nodeWidth * aspect + 10)];
+                return [nodeWidth, Math.max(160 + toolbarH, nodeWidth * aspect + toolbarH + 10)];
             }
-            return [nodeWidth, 200];
+            return [nodeWidth, 200 + toolbarH];
         };
         videoEl.addEventListener("loadedmetadata", () => {
+            // Update the resolution readout and re-pack the node.
+            if (videoEl.videoWidth && videoEl.videoHeight) {
+                resLbl.textContent =
+                    videoEl.videoWidth + "\u00d7" + videoEl.videoHeight;
+            }
             node.setSize(node.computeSize());
             app.graph.setDirtyCanvas(true);
         });
+
+        // CHANGED v3.1.0 \u2014 dispose pipeline when node is removed so
+        // we don't leak rAF loops or GL contexts on long workflow sessions.
+        const _origRemoved = node.onRemoved;
+        node.onRemoved = function() {
+            if (node._kevHDRPipeline) {
+                try { node._kevHDRPipeline.dispose(); } catch (e) {}
+                node._kevHDRPipeline = null;
+            }
+            if (_origRemoved) _origRemoved.call(this);
+        };
     }
 }
 
